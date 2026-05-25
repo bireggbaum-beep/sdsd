@@ -1042,6 +1042,9 @@ function clampFutureSessions(s) {
   (s.modules || []).forEach(m => {
     if (m.last_session_date && m.last_session_date > now) m.last_session_date = now;
   });
+  // Auch den Sync-Konflikt-Schlüssel kappen: ein zukunfts-datiertes updated_at würde
+  // sonst dauerhaft als "neuester Stand" gelten und jedes frische Abhaken überschreiben.
+  if (s.updated_at && s.updated_at > now) s.updated_at = now;
   return s;
 }
 function save() {
