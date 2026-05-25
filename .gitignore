@@ -1,0 +1,4 @@
+# Nur die App wird veröffentlicht — alles andere bleibt lokal.
+*
+!.gitignore
+!sdsd.html
