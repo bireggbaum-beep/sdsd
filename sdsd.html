@@ -165,10 +165,34 @@
   .mod-sparkstrip {
     position: absolute;
     bottom: 0; left: 0; right: 0;
-    height: 100%;
-    opacity: 0.18;
+    height: 3px;
     pointer-events: none;
     overflow: hidden;
+  }
+  .heat-track {
+    position: relative;
+    display: flex;
+    gap: 1px;
+    width: 100%; height: 100%;
+  }
+  .heat-box {
+    flex: 1 1 0;
+    height: 100%;
+    border-radius: 1px;
+  }
+  .heat-marker {
+    position: absolute;
+    top: -1px; bottom: -1px; width: 2px;
+    margin-left: -1px; z-index: 1;
+    background: #fff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.65);
+  }
+  .heat-axis {
+    display: flex; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px; letter-spacing: 0.06em;
+    color: var(--text-faint);
+    margin-top: 3px;
   }
   .module-card:active { background: var(--panel); }
   .tier-stripe { background: var(--text-faint); transition: background 0.4s; }
@@ -303,6 +327,16 @@
     background: var(--accent);
     color: var(--bg);
     border-color: var(--accent);
+  }
+  .param-control button[data-heatwin] {
+    width: auto; height: auto;
+    padding: 6px 12px;
+    font-size: 11px;
+  }
+  .param-control button[data-heatwin].on {
+    background: var(--panel-hi);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .param-value {
     font-family: 'JetBrains Mono', monospace;
@@ -508,14 +542,10 @@
   .md-val.warn   { color: var(--t-yellow); }
   .md-val.danger { color: var(--t-red); }
   .md-spark {
-    margin-top: 6px;
-    height: 28px;
-    overflow: hidden;
+    margin-top: 8px;
   }
-  .md-spark svg {
-    display: block;
-    width: 100%;
-    height: 28px;
+  .md-spark .heat-track {
+    height: 22px;
   }
   .md-params {
     font-size: 10px; color: var(--text-dim);
@@ -965,6 +995,7 @@ const DEFAULTS = {
     sessions_per_day: 1.5,
     min_sps_threshold: 8,
     energy_filter: ['low','med','high'],
+    heat_window_days: 14,
   }
 };
 let S = load();
@@ -1691,8 +1722,8 @@ function buildCompactDetail(m) {
   const sl = stateLevel(m);
   let ttcText = '—';
   if (m.cycle_type === 'decay') {
-    if (sl >= 10) ttcText = 'Jetzt kritisch';
-    else if (m.decay_rate > 0) ttcText = `${((10 - sl) / m.decay_rate).toFixed(1)}d`;
+    if (sl >= CRISIS_STATE) ttcText = 'Jetzt kritisch';
+    else if (m.decay_rate > 0) ttcText = `${((CRISIS_STATE - sl) / m.decay_rate).toFixed(1)}d`;
   } else if (m.cycle_type === 'anchor' && m.next_anchor_date) {
     ttcText = `${calendarDaysUntil(m.next_anchor_date)}d bis Anker`;
   }
@@ -1737,21 +1768,17 @@ function buildCompactDetail(m) {
     </div>`;
 }
 
-function renderDetailSparkline(container, m) {
-  const now = Date.now();
+function heatWindowDays() { return S.config.heat_window_days || 14; }
+
+// Rekonstruiert den Entropie-Verlauf als sortierte Stützpunkte (ts, s) im Fenster.
+function statePoints(m, fromTs, toTs) {
   const DAY = 86400000;
-  const fromTs = now - 30 * DAY;
   const logs = S.sessions.filter(s => s.mod_id === m.id).sort((a, b) => a.ts - b.ts);
-  const W = 280, H = 28;
-  const span = now - fromTs;
-  if (span <= 0) return;
-  const toX = ts => Math.max(0, Math.min(W, ((ts - fromTs) / span) * W));
-  const toY = state => H - (Math.min(10, Math.max(0, state)) / 10) * H;
   const pts = [];
-  const logsBefore = logs.filter(l => l.ts < fromTs);
+  const before = logs.filter(l => l.ts < fromTs);
   let startState;
-  if (logsBefore.length > 0) {
-    const last = logsBefore[logsBefore.length - 1];
+  if (before.length > 0) {
+    const last = before[before.length - 1];
     startState = m.cycle_type === 'decay'
       ? Math.min(10, last.state_after + m.decay_rate * ((fromTs - last.ts) / DAY))
       : 0;
@@ -1759,35 +1786,68 @@ function renderDetailSparkline(container, m) {
     startState = m.last_observed_state || 0;
   }
   pts.push({ ts: fromTs, s: startState });
-  const logsIn = logs.filter(l => l.ts >= fromTs && l.ts <= now);
-  for (const log of logsIn) {
+  for (const log of logs.filter(l => l.ts >= fromTs && l.ts <= toTs)) {
     pts.push({ ts: log.ts, s: log.state_before });
     pts.push({ ts: log.ts + 500, s: log.state_after });
   }
-  pts.push({ ts: now, s: stateLevel(m) });
+  pts.push({ ts: toTs, s: stateLevel(m) });
   pts.sort((a, b) => a.ts - b.ts);
-  if (pts.length < 2) return;
-  let linePath = `M ${toX(pts[0].ts).toFixed(1)} ${toY(pts[0].s).toFixed(1)}`;
+  return pts;
+}
+
+// Lineare Interpolation des Zustands zu einem Zeitpunkt (zwischen den Stützpunkten).
+function stateAtTs(pts, ts) {
+  if (ts <= pts[0].ts) return pts[0].s;
+  const lastP = pts[pts.length - 1];
+  if (ts >= lastP.ts) return lastP.s;
   for (let i = 1; i < pts.length; i++) {
-    linePath += ` L ${toX(pts[i].ts).toFixed(1)} ${toY(pts[i].s).toFixed(1)}`;
+    if (pts[i].ts >= ts) {
+      const a = pts[i - 1], b = pts[i];
+      const t = (ts - a.ts) / Math.max(1, b.ts - a.ts);
+      return a.s + (b.s - a.s) * t;
+    }
   }
-  const last = pts[pts.length - 1], first = pts[0];
-  const areaPath = linePath + ` L ${toX(last.ts).toFixed(1)} ${H} L ${toX(first.ts).toFixed(1)} ${H} Z`;
-  const tier = tierClass(sps(m));
-  const colors = { 't-blue':'#4a9eff', 't-green':'#4ade80', 't-yellow':'#fbbf24', 't-red':'#f43f5e' };
-  const color = colors[tier] || '#d4ff00';
-  container.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="dsg-${m.id}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
-          <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
-        </linearGradient>
-      </defs>
-      <path d="${areaPath}" fill="url(#dsg-${m.id})"/>
-      <path d="${linePath}" fill="none" stroke="${color}" stroke-width="1.2"/>
-      <line x1="0" y1="${toY(10).toFixed(1)}" x2="${W}" y2="${toY(10).toFixed(1)}" stroke="${color}" stroke-width="0.5" stroke-dasharray="3,4" opacity="0.4"/>
-    </svg>`;
+  return lastP.s;
+}
+
+// Pro-Tag-Farbe (Zustand am Tagesende) als Tageskästchen. So ist das rechte Kästchen
+// exakt der Jetzt-Zustand = linker Streifen. Krise (>= CRISIS_STATE) = Rot.
+function heatSegments(m, fromTs, toTs, days) {
+  const pts = statePoints(m, fromTs, toTs);
+  const dayMs = (toTs - fromTs) / days;
+  const cols = [];
+  for (let d = 0; d < days; d++) {
+    const sl = stateAtTs(pts, fromTs + (d + 1) * dayMs);
+    cols.push(stateColor(m, sl));
+  }
+  return cols;
+}
+
+function heatBoxes(colors) {
+  return colors.map(c => `<div class="heat-box" style="background:${c}"></div>`).join('');
+}
+
+// Detaillierte Heatbar fürs Accordion: Tageskästchen + Session-Marker + Zeitachse.
+function buildDetailedHeatbar(m) {
+  const now = Date.now();
+  const days = heatWindowDays();
+  const fromTs = now - days * 86400000;
+  const span = now - fromTs;
+  const boxes = heatBoxes(heatSegments(m, fromTs, now, days));
+  const toPct = ts => ((ts - fromTs) / span) * 100;
+
+  let markers = '';
+  const sessions = S.sessions.filter(s => s.mod_id === m.id && s.kind === 'session' && s.ts >= fromTs && s.ts <= now);
+  for (const slog of sessions) {
+    markers += `<div class="heat-marker" style="left:${toPct(slog.ts).toFixed(2)}%"></div>`;
+  }
+  return `
+    <div class="heat-track">${boxes}${markers}</div>
+    <div class="heat-axis"><span>−${days}d</span><span>−${Math.round(days / 2)}d</span><span>jetzt</span></div>`;
+}
+
+function renderDetailSparkline(container, m) {
+  container.innerHTML = buildDetailedHeatbar(m);
 }
 
 function tickCompactDetail(modId) {
@@ -1802,8 +1862,8 @@ function tickCompactDetail(modId) {
   if (stzEl) stzEl.textContent = `×${sessionsToZero(m)}`;
   let ttcText = '—';
   if (m.cycle_type === 'decay') {
-    if (sl >= 10) ttcText = 'Jetzt kritisch';
-    else if (m.decay_rate > 0) ttcText = `${((10 - sl) / m.decay_rate).toFixed(1)}d`;
+    if (sl >= CRISIS_STATE) ttcText = 'Jetzt kritisch';
+    else if (m.decay_rate > 0) ttcText = `${((CRISIS_STATE - sl) / m.decay_rate).toFixed(1)}d`;
   } else if (m.cycle_type === 'anchor' && m.next_anchor_date) {
     ttcText = `${calendarDaysUntil(m.next_anchor_date)}d bis Anker`;
   }
@@ -1920,7 +1980,6 @@ function tickLive() {
     const sl = stateLevel(m);
     const spsVal = sps(m);
     const stz = sessionsToZero(m);
-    const tier = tierClass(spsVal);
 
     const stateEl = card.querySelector('[data-live-state]');
     if (stateEl) stateEl.textContent = `Entropie ${sl.toFixed(4)}`;
@@ -1929,7 +1988,7 @@ function tickLive() {
     const stzEl = card.querySelector('[data-live-stz]');
     if (stzEl) stzEl.textContent = `×${stz}`;
     const stripe = card.querySelector('.tier-stripe');
-    if (stripe) stripe.className = `tier-stripe ${tier}`;
+    if (stripe) { stripe.className = 'tier-stripe'; stripe.style.background = stateColor(m, sl); }
     const driftEl = card.querySelector('[data-live-drift]');
     if (driftEl) {
       const { driftText, driftClass } = modStateStripData(m);
@@ -2275,9 +2334,10 @@ function renderModules() {
   });
 }
 
-function driftPhase(m) {
+// Phase für einen BELIEBIGEN Zustandswert (nicht nur den aktuellen) — Basis für
+// historische Tageskästchen, damit Box-Farbe, Streifen und Label dieselbe Quelle haben.
+function phaseForState(m, sl) {
   if (m.cycle_type !== 'decay' || m.decay_rate <= 0) return null;
-  const sl = stateLevel(m);
   if (sl >= CRISIS_STATE) return { days: 0, ratio: 0, phase: 'krise' };
   const days = (CRISIS_STATE - sl) / m.decay_rate;
   const cycleTime = CRISIS_STATE / m.decay_rate;
@@ -2293,27 +2353,44 @@ function driftPhase(m) {
   return { days, ratio, phase };
 }
 
+function driftPhase(m) { return phaseForState(m, stateLevel(m)); }
+
+// EINE Schwere-Sprache: Phase -> Farbe. Dieselbe Quelle wie Label ("Kippt/Krisenzone")
+// und Sortierung. Rot = Krise/kippt = jetzt handeln. Wird für Streifen UND Kästchen genutzt.
+const PHASE_COLOR = {
+  krise:     '#f43f5e',
+  kippt:     '#f43f5e',
+  eskaliert: '#fb923c',
+  driftet:   '#fbbf24',
+  ruhig:     '#4ade80',
+};
+function stateColor(m, sl) {
+  const dp = phaseForState(m, sl);
+  if (dp) return PHASE_COLOR[dp.phase] || '#4a9eff';
+  return sl >= CRISIS_STATE ? '#f43f5e' : '#4a9eff';
+}
+
 function modStateStripData(m) {
   const sl = stateLevel(m);
   const spsVal = sps(m);
-  const tier = tierClass(spsVal);
+  const stripColor = stateColor(m, sl);
   let driftText = '—', driftClass = '';
   const dp = driftPhase(m);
   if (dp) {
     switch (dp.phase) {
-      case 'ruhig':     driftText = `Ruhig · ${Math.ceil(dp.days)}d`; driftClass = ''; break;
-      case 'driftet':   driftText = `Driftet · ${Math.ceil(dp.days)}d`; driftClass = ''; break;
-      case 'eskaliert': driftText = `Eskaliert · ${Math.ceil(dp.days)}d`; driftClass = 'warn'; break;
+      case 'ruhig':     driftText = `Ruhig · ${dp.days.toFixed(1)}d`; driftClass = ''; break;
+      case 'driftet':   driftText = `Driftet · ${dp.days.toFixed(1)}d`; driftClass = ''; break;
+      case 'eskaliert': driftText = `Eskaliert · ${dp.days.toFixed(1)}d`; driftClass = 'warn'; break;
       case 'kippt':     driftText = `Kippt · ${dp.days.toFixed(1)}d`; driftClass = 'crisis'; break;
       case 'krise':     driftText = 'Krisenzone'; driftClass = 'crisis'; break;
     }
   }
-  return { sl, spsVal, tier, driftText, driftClass };
+  return { sl, spsVal, stripColor, driftText, driftClass };
 }
 
 function modEditCard(m) {
   const isAnchor = m.cycle_type === 'anchor';
-  const { sl, spsVal, tier, driftText, driftClass } = modStateStripData(m);
+  const { sl, spsVal, stripColor, driftText, driftClass } = modStateStripData(m);
   return `
     <div class="mod-edit" data-mod-live="${m.id}">
       <div class="mod-edit-header">
@@ -2321,7 +2398,7 @@ function modEditCard(m) {
         <span class="type-badge">${isAnchor ? 'anchor' : 'decay'}</span>
       </div>
       <div class="mod-state-strip">
-        <div class="strip-tier ${tier}"></div>
+        <div class="strip-tier" style="background:${stripColor}"></div>
         <span class="mod-state-val">Entropie <strong data-ms-state>${sl.toFixed(3)}</strong></span>
         <span class="mod-state-val">Druck <strong data-ms-sps>${spsVal.toFixed(2)}</strong></span>
         <span class="mod-state-drift ${driftClass}" data-ms-drift>${driftText}</span>
@@ -2430,6 +2507,10 @@ function renderSettings() {
           <span class="param-value" id="cfg-min_sps_threshold">${S.config.min_sps_threshold}</span>
           <button data-cfg-adj="min_sps_threshold|1|0|30|0">+</button>
         </div>
+        <span class="param-label">Heatbar-Fenster</span>
+        <div class="param-control">
+          ${[14, 20, 30].map(d => `<button class="${heatWindowDays() === d ? 'on' : ''}" data-heatwin="${d}">${d}d</button>`).join('')}
+        </div>
       </div>
 
       <div style="margin-top: 24px; padding-top: 18px; border-top: 1px dashed var(--border)">
@@ -2464,6 +2545,9 @@ function renderSettings() {
     const [key, delta, min, max, dec] = btn.dataset.cfgAdj.split('|');
     setupHoldRepeat(btn, () =>
       adjustConfigLive(key, parseFloat(delta), parseFloat(min), parseFloat(max), parseInt(dec)));
+  });
+  document.querySelectorAll('[data-heatwin]').forEach(btn => {
+    btn.onclick = () => { S.config.heat_window_days = parseInt(btn.dataset.heatwin); save(); render(); };
   });
 }
 
@@ -3016,8 +3100,8 @@ function tickDetail(modId) {
 
   let ttcText = '—';
   if (m.cycle_type === 'decay') {
-    if (sl >= 10) ttcText = 'Jetzt kritisch';
-    else if (m.decay_rate > 0) ttcText = `${((10 - sl) / m.decay_rate).toFixed(1)}d`;
+    if (sl >= CRISIS_STATE) ttcText = 'Jetzt kritisch';
+    else if (m.decay_rate > 0) ttcText = `${((CRISIS_STATE - sl) / m.decay_rate).toFixed(1)}d`;
   } else if (m.cycle_type === 'anchor' && m.next_anchor_date) {
     ttcText = `${calendarDaysUntil(m.next_anchor_date)}d bis Anker`;
   }
@@ -3060,8 +3144,8 @@ function openDetailView(modId) {
 
   let ttcText = '—';
   if (m.cycle_type === 'decay') {
-    if (sl >= 10) ttcText = 'Jetzt kritisch';
-    else if (m.decay_rate > 0) ttcText = `${((10 - sl) / m.decay_rate).toFixed(1)}d`;
+    if (sl >= CRISIS_STATE) ttcText = 'Jetzt kritisch';
+    else if (m.decay_rate > 0) ttcText = `${((CRISIS_STATE - sl) / m.decay_rate).toFixed(1)}d`;
   } else if (m.cycle_type === 'anchor' && m.next_anchor_date) {
     ttcText = `${calendarDaysUntil(m.next_anchor_date)}d bis Anker`;
   }
@@ -3184,70 +3268,25 @@ function buildSparkline(m, logs, fromTs, toTs) {
   </svg>`;
 }
 
-// ─── SPARKLINE-BG (Router-Karten-Hintergrund) ──────────────────────────────
-// Subtile, durchscheinende Mini-Sparkline als Hintergrund jeder Router-Karte.
-// Farbgebung folgt dem aktuellen Tier (blau/grün/gelb/rot).
+// ─── OVERVIEW-HEATBAR (Router-Karten-Ribbon) ───────────────────────────────
+// Reduzierte Heatbar: dünnes Farb-Ribbon (14d) + Marker der letzten Session.
 // Kein Live-Update — wird nur beim Re-Render der View neu gezeichnet.
 function renderSparklineBg(card, m) {
-  const now = Date.now();
-  const DAY = 86400000;
-  const fromTs = now - 30 * DAY;
-  const logs = S.sessions.filter(s => s.mod_id === m.id).sort((a, b) => a.ts - b.ts);
-
-  const W = 280, H = 48;
-  const span = now - fromTs;
-  if (span <= 0) return;
-
-  const toX = ts => Math.max(0, Math.min(W, ((ts - fromTs) / span) * W));
-  const toY = state => H - (Math.min(10, Math.max(0, state)) / 10) * H;
-
-  const pts = [];
-  const logsBefore = logs.filter(l => l.ts < fromTs);
-  let startState;
-  if (logsBefore.length > 0) {
-    const last = logsBefore[logsBefore.length - 1];
-    startState = m.cycle_type === 'decay'
-      ? Math.min(10, last.state_after + m.decay_rate * ((fromTs - last.ts) / DAY))
-      : 0;
-  } else {
-    startState = m.last_observed_state || 0;
-  }
-  pts.push({ ts: fromTs, s: startState });
-
-  const logsIn = logs.filter(l => l.ts >= fromTs && l.ts <= now);
-  for (const log of logsIn) {
-    pts.push({ ts: log.ts, s: log.state_before });
-    pts.push({ ts: log.ts + 500, s: log.state_after });
-  }
-  pts.push({ ts: now, s: stateLevel(m) });
-  pts.sort((a, b) => a.ts - b.ts);
-
-  if (pts.length < 2) return;
-
-  let linePath = `M ${toX(pts[0].ts).toFixed(1)} ${toY(pts[0].s).toFixed(1)}`;
-  for (let i = 1; i < pts.length; i++) {
-    linePath += ` L ${toX(pts[i].ts).toFixed(1)} ${toY(pts[i].s).toFixed(1)}`;
-  }
-  const last = pts[pts.length - 1], first = pts[0];
-  const areaPath = linePath + ` L ${toX(last.ts).toFixed(1)} ${H} L ${toX(first.ts).toFixed(1)} ${H} Z`;
-
-  const tier = tierClass(sps(m));
-  const colors = { 't-blue':'#4a9eff', 't-green':'#4ade80', 't-yellow':'#fbbf24', 't-red':'#f43f5e' };
-  const color = colors[tier] || '#d4ff00';
-
   const bg = card.querySelector('[data-spark]');
   if (!bg) return;
-  bg.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:100%;display:block" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="sg-${m.id}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${color}" stop-opacity="0.5"/>
-          <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
-        </linearGradient>
-      </defs>
-      <path d="${areaPath}" fill="url(#sg-${m.id})"/>
-      <path d="${linePath}" fill="none" stroke="${color}" stroke-width="1.2"/>
-    </svg>`;
+  const now = Date.now();
+  const days = heatWindowDays();
+  const fromTs = now - days * 86400000;
+  const span = now - fromTs;
+  const boxes = heatBoxes(heatSegments(m, fromTs, now, days));
+
+  const sessions = S.sessions.filter(s => s.mod_id === m.id && s.kind === 'session' && s.ts >= fromTs && s.ts <= now);
+  const lastSession = sessions[sessions.length - 1];
+  const marker = lastSession
+    ? `<div class="heat-marker" style="left:${(((lastSession.ts - fromTs) / span) * 100).toFixed(2)}%"></div>`
+    : '';
+
+  bg.innerHTML = `<div class="heat-track">${boxes}${marker}</div>`;
 }
 
 // ─── MISC ──────────────────────────────────────────────────────────────────
@@ -3288,9 +3327,9 @@ function tickModules() {
   document.querySelectorAll('[data-mod-live]').forEach(card => {
     const m = S.modules.find(x => x.id === card.dataset.modLive);
     if (!m) return;
-    const { sl, spsVal, tier, driftText, driftClass } = modStateStripData(m);
+    const { sl, spsVal, stripColor, driftText, driftClass } = modStateStripData(m);
     const strip = card.querySelector('.strip-tier');
-    if (strip) strip.className = `strip-tier ${tier}`;
+    if (strip) { strip.className = 'strip-tier'; strip.style.background = stripColor; }
     const stateEl = card.querySelector('[data-ms-state]');
     if (stateEl) stateEl.textContent = sl.toFixed(3);
     const spsEl = card.querySelector('[data-ms-sps]');
