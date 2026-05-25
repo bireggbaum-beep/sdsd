@@ -1005,6 +1005,7 @@
 })();
 
 // ─── STORAGE ───────────────────────────────────────────────────────────────
+let clockOffset = 0;   // Serverzeit − lokale Uhr; gegen Geräte-Uhren-Differenz (via syncClock)
 const STORAGE_KEY = 'sdsd_v1';
 const DEFAULTS = {
   modules: [],
@@ -1037,14 +1038,14 @@ function load() {
 // Sicht der lokalen Uhr) in der Zukunft liegt, würde sonst den Decay auf 0 einfrieren.
 // Auf "jetzt" begrenzen → Modul läuft normal weiter, statt eingefroren zu bleiben.
 function clampFutureSessions(s) {
-  const now = Date.now();
+  const now = nowMs();
   (s.modules || []).forEach(m => {
     if (m.last_session_date && m.last_session_date > now) m.last_session_date = now;
   });
   return s;
 }
 function save() {
-  S.updated_at = Date.now();
+  S.updated_at = nowMs();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
   cloudDirty = true;        // dieses Gerät hat ungesicherte Änderungen
   cloudPushDebounced();
@@ -1087,6 +1088,7 @@ async function cloudPull() {
   setSyncStatus('busy');
   try {
     const res = await fetch(`${CLOUD_ENDPOINT}?id=eq.${CLOUD_ROW_ID}&select=data`, { headers: CLOUD_HEADERS });
+    syncClock(res);
     if (!res.ok) throw new Error('pull ' + res.status);
     const rows = await res.json();
     if (rows.length === 0) { await cloudWrite(); return; } // Cloud leer → lokalen Stand initialisieren
@@ -1142,7 +1144,7 @@ async function cloudPush() {
 
 // Roher Schreibvorgang ohne Check (intern: Reconcile, Init, Konflikt-Auflösung).
 async function cloudWrite() {
-  const ts = S.updated_at || Date.now();
+  const ts = S.updated_at || nowMs();
   const res = await fetch(CLOUD_ENDPOINT, {
     method: 'POST',
     headers: { ...CLOUD_HEADERS, 'Prefer': 'resolution=merge-duplicates' },
@@ -1170,7 +1172,14 @@ function cloudFlush() {
 
 // ─── ENGINE ────────────────────────────────────────────────────────────────
 const DAY_MS = 86400000;
-function nowMs() { return Date.now(); }
+function nowMs() { return Date.now() + clockOffset; }
+// Autoritative Serverzeit aus dem Date-Header einer Supabase-Antwort übernehmen.
+function syncClock(res) {
+  try {
+    var h = res && res.headers && res.headers.get('date');
+    if (h) { var srv = Date.parse(h); if (!isNaN(srv)) clockOffset = srv - Date.now(); }
+  } catch (e) {}
+}
 function todayStart() { const d = new Date(); d.setHours(0,0,0,0); return d.getTime(); }
 function daysSinceFrac(ts) { return Math.max(0, (nowMs() - ts) / DAY_MS); }
 function calendarDaysUntil(ts) {
@@ -1553,7 +1562,7 @@ function doSession(modId) {
   delete m.snoozed_until; // erledigt = kein "später" mehr
   S.sessions.push({
     id: uid(), kind: 'session', mod_id: m.id, mod_name: m.name,
-    ts: Date.now(), state_before: +before.toFixed(3), state_after: +after.toFixed(3)
+    ts: nowMs(), state_before: +before.toFixed(3), state_after: +after.toFixed(3)
   });
   save(); render();
 }
@@ -1566,7 +1575,7 @@ function doCrash(modId) {
   m.last_session_date = nowMs();
   S.sessions.push({
     id: uid(), kind: 'crash', mod_id: m.id, mod_name: m.name,
-    ts: Date.now(), state_before: +before.toFixed(3), state_after: +after.toFixed(3)
+    ts: nowMs(), state_before: +before.toFixed(3), state_after: +after.toFixed(3)
   });
   save(); render();
 }
@@ -1733,7 +1742,7 @@ function collapseDetail() {
 }
 
 function buildCompactDetail(m) {
-  const now = Date.now();
+  const now = nowMs();
   const DAY = 86400000;
   const thirtyDaysAgo = now - 30 * DAY;
   const modLogs = S.sessions.filter(s => s.mod_id === m.id).sort((a, b) => a.ts - b.ts);
@@ -1857,7 +1866,7 @@ function heatBoxes(colors) {
 
 // Detaillierte Heatbar fürs Accordion: Tageskästchen + Session-Marker + Zeitachse.
 function buildDetailedHeatbar(m) {
-  const now = Date.now();
+  const now = nowMs();
   const days = heatWindowDays();
   const fromTs = now - days * 86400000;
   const span = now - fromTs;
@@ -3085,7 +3094,7 @@ function showConflictModal() {
 }
 async function resolveConflictKeepLocal() {
   closeModal();
-  S.updated_at = Date.now();
+  S.updated_at = nowMs();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
   setSyncStatus('busy');
   try { await cloudWrite(); setSyncStatus('ok'); }
@@ -3302,7 +3311,7 @@ function buildSparkline(m, logs, fromTs, toTs) {
 function renderSparklineBg(card, m) {
   const bg = card.querySelector('[data-spark]');
   if (!bg) return;
-  const now = Date.now();
+  const now = nowMs();
   const days = heatWindowDays();
   const fromTs = now - days * 86400000;
   const span = now - fromTs;
