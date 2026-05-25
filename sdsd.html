@@ -3368,19 +3368,6 @@ function tickModules() {
 }
 setInterval(() => { if (view === 'router') tickLive(); else if (view === 'modules') tickModules(); else if (view === 'doing') tickDoing(); }, 1000);
 setInterval(updateClock, 30000);
-
-// TEMP-DEBUG: isoliert ob der 1s-Timer feuert / Zeit läuft / stateLevel sich ändert.
-var __dbgTick = 0;
-setInterval(function () {
-  __dbgTick++;
-  var el = document.getElementById('__dbg');
-  if (!el) { el = document.createElement('div'); el.id = '__dbg'; el.style.cssText = 'position:fixed;top:0;left:0;z-index:99999;background:#000;color:#0f0;font:10px monospace;padding:2px 5px'; (document.body || document.documentElement).appendChild(el); }
-  var m = S.modules && S.modules[0];
-  var now = Date.now();
-  var ts = m && m.last_session_date;
-  var diffH = ts ? ((now - ts) / 3600000).toFixed(2) : 'noTs';
-  el.textContent = 'tick:' + __dbgTick + ' now:' + now + ' ts:' + ts + ' diffH:' + diffH + ' sl:' + (m ? stateLevel(m).toFixed(4) : '-');
-}, 1000);
 </script>
 </body>
 </html>
