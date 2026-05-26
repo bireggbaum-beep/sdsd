@@ -1030,8 +1030,18 @@ function load() {
     }
     delete merged.config.budget_per_interval;
     delete merged.config.interval_start;
-    return merged;
+    return clampFutureSessions(merged);
   } catch(e) { console.error('load failed', e); return clone(DEFAULTS); }
+}
+// Robustheit gegen Uhren-Differenz zwischen Geräten: ein last_session_date, das (aus
+// Sicht der lokalen Uhr) in der Zukunft liegt, würde sonst den Decay auf 0 einfrieren.
+// Auf "jetzt" begrenzen → Modul läuft normal weiter, statt eingefroren zu bleiben.
+function clampFutureSessions(s) {
+  const now = Date.now();
+  (s.modules || []).forEach(m => {
+    if (m.last_session_date && m.last_session_date > now) m.last_session_date = now;
+  });
+  return s;
 }
 function save() {
   S.updated_at = Date.now();
@@ -1086,7 +1096,7 @@ async function cloudPull() {
     cloudBaseTs = remoteTs;   // wir kennen jetzt den aktuellen Cloud-Stand
     if (remoteTs > localTs && !cloudDirty) {
       // Remote ist neuer UND dieses Gerät hat keine ungesicherten Änderungen → übernehmen.
-      S = { ...clone(DEFAULTS), ...remote, config: { ...DEFAULTS.config, ...(remote.config || {}) } };
+      S = clampFutureSessions({ ...clone(DEFAULTS), ...remote, config: { ...DEFAULTS.config, ...(remote.config || {}) } });
       localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
       cloudDirty = false;
       render();
