@@ -986,6 +986,24 @@
 <script>
 'use strict';
 
+// ─── SICHTBARER FEHLER-FÄNGER (Diagnose, v.a. für entfernte Geräte) ──────────
+// Zeigt jeden unbehandelten JS-Fehler als roten Balken unten an, statt still in
+// der Konsole zu verschwinden. So sieht man auf Handy/Tablet sofort, was bricht.
+(function () {
+  function show(msg) {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#f43f5e;color:#fff;font:11px/1.4 monospace;padding:8px;white-space:pre-wrap;max-height:40vh;overflow:auto';
+    d.textContent = 'JS-FEHLER: ' + msg;
+    (document.body || document.documentElement).appendChild(d);
+  }
+  window.addEventListener('error', function (e) {
+    show((e.message || e.error || 'unbekannt') + '\n@ ' + (e.filename || '') + ':' + (e.lineno || '') + ':' + (e.colno || ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    show('Promise: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+  });
+})();
+
 // ─── STORAGE ───────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'sdsd_v1';
 const DEFAULTS = {
@@ -1627,7 +1645,7 @@ function render() {
 
 // Schwere-Rang der Drift-Phase: akut zuerst. Anchor/ohne Phase → ganz hinten.
 const PHASE_RANK = { krise: 0, kippt: 1, eskaliert: 2, driftet: 3, ruhig: 4 };
-function phaseRank(dp) { return dp ? (PHASE_RANK[dp.phase] ?? 4) : 5; }
+function phaseRank(dp) { if (!dp) return 5; const r = PHASE_RANK[dp.phase]; return r === undefined ? 4 : r; }
 
 // Gemeinsame Routing-Wahrheit für Router (Cockpit) und Doing-Modus:
 // gleiche Filterung + Sortierung, damit beide Oberflächen nie auseinanderdriften.
